@@ -1,0 +1,220 @@
+services:
+
+    frontend:
+      container_name: fleet-frontend
+      image: fleet-frontend:latest
+      build:
+        context: ./nagp-fleet
+      ports:
+        - "3000:80"
+      depends_on:
+        - api-gateway
+      networks:
+        - microservices-net
+      restart: unless-stopped
+
+    discovery-server:
+      container_name: discovery-server
+      image: discovery-server:latest
+      build:
+        context: ./discoveryServer
+      ports:
+        - "8761:8761"
+      environment:
+        - HOSTNAME=discovery-server
+      networks:
+        - microservices-net
+      healthcheck:
+        test: ["CMD-SHELL", "curl -f http://localhost:8761/actuator/health || exit 1"]
+        interval: 15s
+        timeout: 10s
+        retries: 5
+        start_period: 60s
+
+    api-gateway:
+      container_name: fleet-api-gateway
+      image: fleet-api-gateway:latest
+      build:
+        context: ./FleetAPIGateway
+      ports:
+        - "9999:9999"
+      depends_on:
+        discovery-server:
+          condition: service_healthy
+      environment:
+        - ERUEKA_INSTANCE_HOSTNAME=fleet-api-gateway
+        - EUREKA_INSTANCE_INSTANCE_ID=fleet-api-gateway:9999
+        - SPRING_APPLICATION_NAME=fleet-api-gateway
+        - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-server:8761/eureka
+        - HOSTNAME=fleet-api-gateway
+        - SPRING_PROFILES_ACTIVE=docker
+      networks:
+        - microservices-net
+
+    db:
+      image: mysql:8.0
+      container_name: fleetuserdb
+      restart: always
+      environment:
+        MYSQL_ROOT_PASSWORD: rootpass
+        MYSQL_DATABASE: fleetuserdb         # schema auto-created
+        MYSQL_USER: user
+        MYSQL_PASSWORD: pass
+      ports:
+        - "3306:3306"
+      volumes:
+        - dbdata:/var/lib/mysql
+      healthcheck:
+        # Use a credentialed query to ensure the DB is ready to accept connections
+        # from clients. mysqladmin ping can return before the server accepts
+        # authenticated client connections in some cases.
+        test: [ "CMD-SHELL", "mysql -u user -ppass -h localhost -e \"SELECT 1\" || exit 1" ]
+        interval: 10s
+        timeout: 10s
+        retries: 10
+        start_period: 30s
+      networks:
+        - microservices-net  
+
+    user-service:
+      container_name: fleet-user-service
+      image: fleet-user-service:latest
+      build:
+        context: ./userService
+      ports:
+        - "8080:8080"
+      depends_on:
+        db:
+          condition: service_healthy
+        discovery-server:
+          condition: service_healthy
+      environment:
+        - ERUEKA_INSTANCE_HOSTNAME=fleet-user-service
+        - EUREKA_INSTANCE_INSTANCE_ID=fleet-user-service:8080
+        - SPRING_APPLICATION_NAME=fleet-user-service
+        - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-server:8761/eureka
+        - HOSTNAME=fleet-user-service
+        - SPRING_PROFILES_ACTIVE=docker
+        - SPRING_DATASOURCE_URL=jdbc:mysql://db:3306/fleetuserdb
+        - SPRING_DATASOURCE_USERNAME=user
+        - SPRING_DATASOURCE_PASSWORD=pass
+        - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+      networks:
+        - microservices-net
+
+    bike-service:
+      container_name: fleet-bike-service
+      image: fleet-bike-service:latest
+      build:
+        context: ./bikeService
+      ports:
+        - "8060:8060"
+      depends_on:
+        db:
+          condition: service_healthy
+        kafka:
+          condition: service_started
+        discovery-server:
+          condition: service_healthy
+      environment:
+        - ERUEKA_INSTANCE_HOSTNAME=fleet-bike-service
+        - EUREKA_INSTANCE_INSTANCE_ID=fleet-bike-service:8060
+        - SPRING_APPLICATION_NAME=fleet-bike-service
+        - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-server:8761/eureka
+        - HOSTNAME=fleet-bike-service
+        - SPRING_PROFILES_ACTIVE=docker
+        - SPRING_DATASOURCE_URL=jdbc:mysql://db:3306/fleetuserdb
+        - SPRING_DATASOURCE_USERNAME=user
+        - SPRING_DATASOURCE_PASSWORD=pass
+        - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+        - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      networks:
+        - microservices-net
+
+    rental-service:
+      container_name: fleet-rental-service
+      image: fleet-rental-service:latest
+      build:
+        context: ./rentalService
+      ports:
+        - "8040:8040"
+      depends_on:
+        db:
+          condition: service_healthy
+        kafka:
+          condition: service_started
+        discovery-server:
+          condition: service_healthy
+      environment:
+        - ERUEKA_INSTANCE_HOSTNAME=fleet-rental-service
+        - EUREKA_INSTANCE_INSTANCE_ID=fleet-rental-service:8040
+        - SPRING_APPLICATION_NAME=fleet-rental-service
+        - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-server:8761/eureka
+        - HOSTNAME=fleet-rental-service
+        - SPRING_PROFILES_ACTIVE=docker
+        - SPRING_DATASOURCE_URL=jdbc:mysql://db:3306/fleetuserdb
+        - SPRING_DATASOURCE_USERNAME=user
+        - SPRING_DATASOURCE_PASSWORD=pass
+        - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+        - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      networks:
+        - microservices-net
+    zookeeper:
+      image: confluentinc/cp-zookeeper:7.4.0
+      container_name: zookeeper
+      ports:
+        - "2181:2181"
+      environment:
+        ZOOKEEPER_CLIENT_PORT: 2181
+        ZOOKEEPER_TICK_TIME: 2000
+      networks:
+        - microservices-net
+
+    kafka:
+      image: confluentinc/cp-kafka:7.4.0
+      container_name: kafka
+      ports:
+        - "9092:9092"
+      environment:
+        KAFKA_BROKER_ID: 1
+        KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+        KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+        KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      networks:
+        - microservices-net
+      depends_on:
+        - zookeeper
+
+    kafka-init:
+      image: confluentinc/cp-kafka:7.4.0
+      container_name: kafka-init
+      depends_on:
+        - kafka
+      networks:
+        - microservices-net
+      entrypoint: [ "/bin/sh", "-c" ]
+      command: |
+        "
+        # Wait for Kafka to be ready
+        echo 'Waiting for Kafka...';
+        kafka-topics --bootstrap-server kafka:9092 --list;
+
+        while ! kafka-topics --bootstrap-server kafka:9092 --list; do sleep 1; done;
+
+        # Create topic
+        kafka-topics --bootstrap-server kafka:9092 --create \
+          --if-not-exists \
+          --topic order-notifications \
+          --partitions 1 \
+          --replication-factor 1;
+
+        echo 'Kafka topic created.';
+        "    
+          
+volumes:
+  dbdata: {}
+
+networks:
+  microservices-net:
+    driver: bridge
